@@ -1,0 +1,6 @@
+wget
+ca-certificates
+curl
+gnupg
+lsb-release
+phing

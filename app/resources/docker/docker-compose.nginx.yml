@@ -1,0 +1,12 @@
+  nginx:
+      image: ${PROJET_NAME}-nginx
+      container_name: ${INSTALL_NAME}-${USER_NAME}-nginx
+      ports:
+        - ${PORT}:80
+      environment:
+        - USER_NAME=${USER_NAME}
+        - USER_ID=${USER_ID}
+        - GROUP_ID=${GROUP_ID}
+        - PROJET_NAME=${PROJET_NAME}
+      volumes:
+        - ./${PROJET_NAME}:/${PROJET_NAME}

@@ -1,0 +1,926 @@
+#!/bin/bash
+
+source "/lib/devcli/color.sh"
+source "/lib/devcli/operation.sh"
+source "/lib/devcli/testing.sh"
+source "/lib/devcli/tools.sh"
+
+readonly DOCKERFILES_PHP_DIRECTORY=/lib/devcli/docker/dockerfiles/php
+readonly DOCKERFILES_NGINX_DIRECTORY=/lib/devcli/docker/dockerfiles/nginx
+readonly ENTRYPOINT_PHP_DIRECTORY=/lib/devcli/docker/entrypoints/php
+readonly ENTRYPOINT_NGINX_DIRECTORY=/lib/devcli/docker/entrypoints/nginx
+readonly DOCKER_COMPOSE_FILE=/lib/devcli/docker/docker-compose.yml
+readonly DOCKER_COMPOSE_PHP_FILE=/lib/devcli/docker/docker-compose.php.yml
+readonly DOCKER_COMPOSE_NGINX_FILE=/lib/devcli/docker/docker-compose.nginx.yml
+readonly VHOSTS_DIRECTORY=/lib/devcli/docker/vhost-template
+readonly CONFIG_PROJETS_DIRECTORY=/etc/devcli/projets
+readonly SCRIPT_PROJETS_DIRECTORY=/etc/devcli/scripts
+readonly DEVCLI_FILE_ENV=/home/$(whoami)/.devcli
+readonly PORT_USABLE_START=3000
+readonly REGEX_NUMBER='^[0-9]+$'
+
+readonly USER_ID=$(id -u)
+readonly GROUP_ID=$(id -g)
+readonly USER_NAME=$(whoami)
+readonly HOME_DIRECTORY=/home/$(whoami)
+
+readonly choice=$1
+
+#Fonctions secondaires
+
+function projet_detail () {
+    local selectProjet
+    while [[ input != "q" ]] || [[ selectProjet != "ok" ]]
+    do
+        read -p "$(cecho cyan "Entrez un projet pour avoir le détail ou q pour quitter : ")" input
+        
+        if [[ $input == "q" ]]; then
+            break
+        fi
+        if [ -d "$CONFIG_PROJETS_DIRECTORY/$input" ]; then
+            cat $CONFIG_PROJETS_DIRECTORY/$input/$input.conf
+            selectProjet="ok"
+            break
+        else
+            cecho red "Le projet indiqué n'existe pas, merci d'indiquer une version installable"
+        fi
+    done
+}
+
+#Var projetName
+function install_projetChoice () {
+    cecho gray "Liste des projets disponible :"
+    DirectoryInPath $CONFIG_PROJETS_DIRECTORY
+    local input
+    while [[ -z "$projetName" ]] 
+    do
+        read -p "$(cecho cyan "Projet souhaité pour l'installation : ")" input
+
+        if [ ! -d "$CONFIG_PROJETS_DIRECTORY/$input" ]; then
+        cecho red "Le projet indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        projetName=$input
+        break
+        fi
+    done
+}
+
+function uninstall_choice () {
+    cecho gray "Liste des installations :"
+    devcliListInstall $DEVCLI_FILE_ENV
+    local input
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom de l'installation : ")" input
+
+        for l in $(cat $DEVCLI_FILE_ENV );do
+           if [[ "$(echo $l | awk -F";" '{print $1}')" == "$input" ]]; then
+               installName=$input
+               projetName=$(echo $l | awk -F";" '{print $2}')
+               installPath=$(echo $l | awk -F";" '{print $3}')
+               break 2
+           fi
+        done
+        cecho red "Nom de l'installation invalide"
+    done
+}
+
+function use_installChoice () {
+    cecho gray "Liste des installations démarrés:"
+    local name
+    local input
+    for l in $(cat $DEVCLI_FILE_ENV );do
+        name=$(echo $l | awk -F";" '{print $1}')
+        if [[ -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+            cecho gray "- $name"
+        fi
+    done
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom de l'installation : ")" input
+
+        for l in $(cat $DEVCLI_FILE_ENV );do
+            name=$(echo $l | awk -F";" '{print $1}')
+            if [[ -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+                if [[ "$name" == "$input" ]]; then
+                    installName=$name
+                    projetName=$(echo $l | awk -F";" '{print $2}')
+                    installPath=$(echo $l | awk -F";" '{print $3}')
+                    break 2
+                fi
+            fi
+        done
+        cecho red "Nom de l'installation invalide"
+    done
+}
+
+function use_serviceChoice () {
+    local input
+    while [[ -z "$useService" ]] 
+    do
+        read -p "$(cecho cyan "Sélection service ? (nginx/php) : ")" input
+
+        case $input in
+            "nginx") useService=nginx;break
+            ;;
+            "php") useService=php;break
+            ;;
+            *) cecho red "Merci de répondre par \"php\" ou \"nginx\""
+            ;;
+        esac
+    done
+}
+
+
+
+
+function log_choice () {
+    cecho gray "Liste des installations démarrés:"
+    stop_listInstallActive
+    local input
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom de l'installation : ")" input
+
+        for l in $(cat $DEVCLI_FILE_ENV );do
+            name=$(echo $l | awk -F";" '{print $1}')
+            if [[ -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+                if [[ "$name" == "$input" ]]; then
+                    installName=$name
+                    projetName=$(echo $l | awk -F";" '{print $2}')
+                    installPath=$(echo $l | awk -F";" '{print $3}')
+                    break 2
+                fi
+            fi
+        done
+        cecho red "Nom de l'installation invalide"
+    done
+}
+
+function remove_choiceProjet () {
+    cecho gray "Liste des projets disponible :"
+    DirectoryInPath $CONFIG_PROJETS_DIRECTORY
+    local input
+    while [[ -z "$projetName" ]] 
+    do
+        read -p "$(cecho cyan "Projet à désinstaller : ")" input
+
+        if [ ! -d "$CONFIG_PROJETS_DIRECTORY/$input" ]; then
+        cecho red "Le projet indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        projetName=$input
+        break
+        fi
+    done
+}
+
+function remove_choiceAssociateInstall () {
+    local input
+    while [[ -z "$deleteInstallForProjet" ]] 
+    do
+        read -p "$(cecho cyan "Retirer les installations associés à ce projet ? (yes/no) : ")" input
+
+        case $input in
+            "yes"|"y") deleteInstallForProjet=TRUE;break
+            ;;
+            "no"|"n") deleteInstallForProjet=FALSE;break
+            ;;
+            *) cecho red "Merci de répondre par yes ou no"
+            ;;
+        esac
+    done
+}
+
+function remove_AssociateImage () {
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]
+    then
+        docker image rm $projetName-nginx || { cecho red "L'image $projetName-nginx a déjà été supprimé ou n'existe pas"; }
+    fi
+    docker image rm $projetName-php || { cecho red "L'image $projetName-php a déjà été supprimé ou n'existe pas"; }
+}
+
+
+
+function start_choiceInstall () {
+    cecho gray "Liste des installations arrêtés:"
+    start_listInstallOffline
+    local input
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom de l'installation : ")" input
+
+        for l in $(cat $DEVCLI_FILE_ENV );do
+           if [[ "$(echo $l | awk -F";" '{print $1}')" == "$input" ]]; then
+               installName=$input
+               projetName=$(echo $l | awk -F";" '{print $2}')
+               installPath=$(echo $l | awk -F";" '{print $3}')
+               break 2
+           fi
+        done
+        cecho red "Nom de l'installation invalide"
+    done
+}
+
+function start_portUse () {
+    if [[ -n "$(docker ps -f publish=$1 --format "{{.Names}}")" ]]
+    then
+        cecho red "Le port souhaité pour lancer votre projet n'est pas disponible, celui-ci est déjà utilisé par le docker $(docker ps -f publish=$1 --format "{{.Names}}")"
+    else
+        installPort=$1
+    fi
+}
+
+function start_portAvailable () {
+    local increment
+    increment=$PORT_USABLE_START
+    while [ -v $installPort ] 
+    do
+        if [ -z "$(docker ps -f publish=$increment --format "{{.Names}}")" ] 
+        then
+            installPort=$increment
+        else
+            ((increment++))
+        fi
+    done
+}
+
+function start_listInstallOffline () {
+    local name
+    for l in $(cat $DEVCLI_FILE_ENV );do
+        name=$(echo $l | awk -F";" '{print $1}')
+        if [[ ! -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+            cecho gray "- $name"
+        fi
+    done
+}
+
+function start_portChoice () {
+    local input
+    while [[ -z "$installPort" ]] 
+    do
+        read -p "$(cecho cyan "Souhaitez vous choisir le port utilisé par nginx pour acceder à l'installation (yes/no) : ")" input
+
+        case $input in
+            "yes"|"y") 
+                while [[ -z "$installPort" ]]  
+                do
+                    read -p "$(cecho cyan "Port Souhaité : ")" input
+                    if [[ $input =~ $REGEX_NUMBER ]]; then
+                        start_portUse $input
+                    else
+                        cecho red "Le port spécifier doit être un nombre entier"
+                    fi
+                done
+            ;;
+            "no"|"n") start_portAvailable
+            ;;
+            *) cecho red "Merci de répondre par yes ou no"
+            ;;
+        esac
+    done
+}
+
+function stop_listInstallActive () {
+    local name
+    for l in $(cat $DEVCLI_FILE_ENV );do
+        name=$(echo $l | awk -F";" '{print $1}')
+        if [[ -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+            cecho gray "- $name"
+        fi
+    done
+}
+
+
+function stop_choiceInstall () {
+    cecho gray "Liste des installations démarrés:"
+    stop_listInstallActive
+    local input
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom de l'installation : ")" input
+
+        for l in $(cat $DEVCLI_FILE_ENV );do
+            name=$(echo $l | awk -F";" '{print $1}')
+            if [[ -n "$(docker ps -f "name=$name-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+                if [[ "$name" == "$input" ]]; then
+                    installName=$name
+                    projetName=$(echo $l | awk -F";" '{print $2}')
+                    installPath=$(echo $l | awk -F";" '{print $3}')
+                    break 2
+                fi
+            fi
+        done
+        cecho red "Nom de l'installation invalide"
+    done
+}
+
+function uninstall_deleteEnv () {
+    local line
+    line=1
+    for l in $(cat $DEVCLI_FILE_ENV );do
+        name=$(echo $l | awk -F";" '{print $1}')
+        if [[ "$name" == "$installName" ]] 
+        then
+            if [[ -n "$line" ]]; then
+                sed -i $line"d" $DEVCLI_FILE_ENV
+            fi
+            break
+        fi
+        ((line++))
+    done
+}
+
+function uninstall_verifyStop () {
+    if [[ -n "$(docker ps -f "name=$installName-$USER_NAME" -f "status=running" --format "{{.Names}}")" ]]; then
+        for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+            if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+                nginxPresent=$(echo $l | awk -F= '{print $2}')
+                break
+            fi
+        done
+        if [[ ! -z "$nginxPresent" ]]
+        then
+            installPort=$(docker ps -f name=$installName-$USER_NAME-nginx --format "{{.Ports}}" | awk -F "->" '{print $1}' | awk -F ":" '{print $2}')
+            cd $installPath
+            PORT=$installPort docker-compose down || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+        else
+            cd $installPath
+            docker-compose down || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+        fi
+    fi
+}
+
+function install_destination () {
+    local input
+    local input2
+    while [[ -z "$installName" ]] 
+    do
+        read -p "$(cecho cyan "Nom du dossier cible souhaité pour l'installation : ")" input
+
+        if [ -d "$HOME_DIRECTORY/$input" ]; then
+            cecho red "Un dossier du même nom se trouve déjà dans votre dossier personnel, souhaitez vous le supprimer ?"
+            read -p "$(cecho cyan "yes/no : ")" input2
+            case "$input2" in
+                "yes"|"y")
+                    installName=$input
+                    deleteDirectory $HOME_DIRECTORY/$installName
+                    createDirectory $HOME_DIRECTORY/$installName
+                    devcliVerifyEnv $DEVCLI_FILE_ENV $installName
+                    echo "$installName;$projetName;$HOME_DIRECTORY/$installName" >> $DEVCLI_FILE_ENV
+                ;;
+                "no"|"n")
+                    exit 0
+                ;;
+                *)
+                    exit 0
+                ;;
+            esac
+        else
+            installName=$input
+            createDirectory $HOME_DIRECTORY/$installName
+            echo "$installName;$projetName;$HOME_DIRECTORY/$installName" >> $HOME_DIRECTORY/.devcli
+        fi
+    done
+}
+
+function install_envfile () {
+    cecho green "Génération du fichier d'environnement .env"
+    echo "PROJET_NAME=$projetName" >> $HOME_DIRECTORY/$installName/.env
+    echo "USER_NAME=$USER_NAME" >> $HOME_DIRECTORY/$installName/.env
+    echo "USER_ID=$USER_ID" >> $HOME_DIRECTORY/$installName/.env
+    echo "GROUP_ID=$GROUP_ID" >> $HOME_DIRECTORY/$installName/.env
+    echo "INSTALL_NAME=$installName" >> $HOME_DIRECTORY/$installName/.env
+    cecho green "Fichier généré"
+}
+
+function install_copy () {
+    local nginxPresent
+    copyFile $DOCKER_COMPOSE_FILE $HOME_DIRECTORY/$installName
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]; then
+        cat $DOCKER_COMPOSE_NGINX_FILE >> $HOME_DIRECTORY/$installName/docker-compose.yml
+    fi
+    cat $DOCKER_COMPOSE_PHP_FILE >> $HOME_DIRECTORY/$installName/docker-compose.yml
+    install_envfile
+}
+
+
+function build_projetChoice () {
+    cecho gray "Liste des projets disponible :"
+    DirectoryInPath $CONFIG_PROJETS_DIRECTORY
+    local input
+    while [[ -z "$projetName" ]] 
+    do
+        read -p "$(cecho cyan "Projet souhaité pour le rebuild : ")" input
+
+        if [ ! -d "$CONFIG_PROJETS_DIRECTORY/$input" ]; then
+        cecho red "Le projet indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        projetName=$input
+        break
+        fi
+    done
+}
+
+function create_name () {
+    local input
+    while [[ -z "$projetName" ]] 
+    do
+        read -p "$(cecho cyan "Veuillez entrer le nom du projet souhaité : ")" input
+
+        if [ -d "$CONFIG_PROJETS_DIRECTORY/$input" ]; then
+        cecho red "Le projet existe déjà, veuillez entrer un nom de projet non existant"
+        else
+        projetName=$input
+        break
+        fi
+    done
+}
+
+#Var phpVersion
+function create_php_version () {
+    cecho gray "Liste des versions php disponible :"
+    DirectoryInPath $DOCKERFILES_PHP_DIRECTORY
+    local input
+    while [[ -z "$phpVersion" ]] 
+    do
+        read -p "$(cecho cyan "Version PHP souhaité : ")" input
+
+        if [ ! -d "$DOCKERFILES_PHP_DIRECTORY/$input" ]; then
+        cecho red "La version PHP indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        phpVersion=$input
+        break
+        fi
+    done
+}
+
+function create_onlyphp () {
+    local input
+    while [[ -z "$onlyPHP" ]] 
+    do
+        read -p "$(cecho cyan "Uniquement PHP ? (yes/no) : ")" input
+
+        case $input in
+            "yes"|"y") onlyPHP=TRUE;break
+            ;;
+            "no"|"n") onlyPHP=FALSE;break
+            ;;
+            *) cecho red "Merci de répondre par yes ou no"
+            ;;
+        esac
+    done
+}
+
+#Var nginxVersion
+function create_nginx_version () {
+    cecho gray "Liste des versions nginx disponible :"
+    DirectoryInPath $DOCKERFILES_NGINX_DIRECTORY
+    local input
+    while [[ -z "$nginxVersion" ]] 
+    do
+        read -p "$(cecho cyan "Version nginx souhaité : ")" input
+
+        if [ ! -d "$DOCKERFILES_NGINX_DIRECTORY/$input" ]; then
+        cecho red "La version nginx indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        nginxVersion=$input
+        break
+        fi
+    done
+}
+
+function create_vhost_nginx () {
+    cecho gray "Liste des templates vhosts pour nginx disponible :"
+    DirectoryInPath $VHOSTS_DIRECTORY
+    local input
+    while [[ -z "$vhostNginx" ]] 
+    do
+        read -p "$(cecho cyan "Template vhost souhaité : ")" input
+
+        if [ ! -f "$VHOSTS_DIRECTORY/$input" ]; then
+        cecho red "La vhost nginx indiqué n'existe pas, merci d'indiquer une version installable"
+        else
+        vhostNginx=$input
+        break
+        fi
+    done
+}
+
+
+function create_composer () {
+    local input
+    while [[ -z "$composer" ]] 
+    do
+        read -p "$(cecho cyan "Installer composer (yes/no) : ")" input
+
+        case $input in
+            "yes"|"y") composer=TRUE;break
+            ;;
+            "no"|"n") composer=FALSE;break
+            ;;
+            *) cecho red "Merci de répondre par yes ou no"
+            ;;
+        esac
+    done
+}
+
+function create_symfonycli () {
+    local input
+    while [[ -z "$symfonycli" ]] 
+    do
+        read -p "$(cecho cyan "Installer symfony (yes/no) : ")" input
+
+        case $input in
+            "yes"|"y") symfonycli=TRUE;break
+            ;;
+            "no"|"n") symfonycli=FALSE;break
+            ;;
+            *) cecho red "Merci de répondre par yes ou no"
+            ;;
+        esac
+    done
+}
+
+function create_extrascript () {
+    local input
+    while [[ -z "$extrascript" ]] 
+    do
+        read -p "$(cecho cyan "Ajouter un script post-installation (chemin absolu ou no) : ")" input
+        if [[ "$input" == "no" ]] || [[ "$input" == "n" ]]; then
+            extrascript=FALSE
+            break
+        fi
+
+        if [ -f "$input" ]; then
+            if [ -x "$input" ]; then
+                extrascript="$input"
+            else
+                chmod +x "$input"
+                extrascript="$input"
+            fi
+        else
+            cecho red "Le chemin du fichier spécifié n'existe pas, veuillez en spécifier un chemin valide"
+        fi
+    done
+}
+
+function create_generateConfigFile () {
+    echo "name=$projetName" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+    echo "php=$phpVersion" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+    if [[ $onlyPHP == "FALSE" ]];then
+        echo "nginx=$nginxVersion" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+        echo "vhost=$vhostNginx" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+    fi
+    echo "composer=$composer" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+    echo "symfonycli=$symfonycli" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+    echo "extrascript=$extrascript" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf"
+
+    if [[ $extrascript == "TRUE" ]]; then
+        echo "#!/bin/bash" >> "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName-script.sh"
+        chmod +x "$CONFIG_PROJETS_DIRECTORY/$projetName/$projetName-script.sh"
+    fi
+}
+
+function create_generateBuild () {
+    local name
+    local php
+    local nginx
+    local composer
+    local symfonycli
+    local extrascript
+    local vhost
+
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "name" ]]; then
+            name=$(echo $l | awk -F= '{print $2}')
+            cecho green "Génération du build du projet $name..."
+            createDirectory $CONFIG_PROJETS_DIRECTORY/$projetName/build
+            break
+        else
+            cecho red "Fichier de configuration incorrect, veuillez vérifier si celui-ci possède un champ \"name\""
+            exit 0
+        fi
+    done
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        #PHP
+        if [[ $(echo $l | awk -F= '{print $1}') == "php" ]]; then
+            php=$(echo $l | awk -F= '{print $2'})
+            createDirectory $CONFIG_PROJETS_DIRECTORY/$projetName/build/php
+            copyContentDirectory $DOCKERFILES_PHP_DIRECTORY/$php $CONFIG_PROJETS_DIRECTORY/$projetName/build/php
+            echo "#!/bin/bash" >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+            cat $ENTRYPOINT_PHP_DIRECTORY/entrypoint-default.sh >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+            chmod +x $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+        fi
+        #NGINX
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginx=$(echo $l | awk -F= '{print $2'})
+            createDirectory $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx
+            copyContentDirectory $DOCKERFILES_NGINX_DIRECTORY/$nginx $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx
+            echo "#!/bin/bash" >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/entrypoint.sh
+            cat $ENTRYPOINT_NGINX_DIRECTORY/entrypoint-default.sh >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/entrypoint.sh
+            chmod +x $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/entrypoint.sh
+        fi
+        #VHOST
+        if [[ $(echo $l | awk -F= '{print $1}') == "vhost" ]]; then
+            vhost=$(echo $l | awk -F= '{print $2'})
+            copyFile $VHOSTS_DIRECTORY/$vhost $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/$projetName-vhost.conf
+        fi
+        #COMPOSER
+        if [[ $(echo $l | awk -F= '{print $1}') == "composer" ]]; then
+            composer=$(echo $l | awk -F= '{print $2'})
+            if [[ "$composer" == "TRUE" ]]; then
+                cat $ENTRYPOINT_PHP_DIRECTORY/entrypoint-composer.sh >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+            fi
+        fi
+        #SYMFONYCLI
+        if [[ $(echo $l | awk -F= '{print $1}') == "symfonycli" ]]; then
+            symfonycli=$(echo $l | awk -F= '{print $2'})
+            if [[ "$symfonycli" == "TRUE" ]]; then
+                cat $ENTRYPOINT_PHP_DIRECTORY/entrypoint-symfonycli.sh >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+            fi
+        fi
+        #EXTRASCRIPT
+        if [[ $(echo $l | awk -F= '{print $1}') == "extrascript" ]]; then
+            extrascript=$(echo $l | awk -F= '{print $2'})
+            if [[ "$extrascript" != "FALSE" ]]; then
+                if [ -f "$extrascript" ]; then
+                    cat "$extrascript" >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+                fi
+            fi
+        fi
+    done
+    #Fin entrypoint php
+    echo -e >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+    echo "exec \"\$@\"" >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/entrypoint.sh
+    #Fin entrypoint nginx
+    if [[ -n "$nginx" ]]; then
+        echo -e >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/entrypoint.sh
+        echo "exec \"\$@\"" >> $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/entrypoint.sh
+    fi
+
+    #Génération des images
+    if [[ -n "$php" ]]; then
+        cecho green-bold "Création de l'image PHP lié au projet sous le nom suivant : $projetName-php"
+        docker build --build-arg PROJET_NAME=$projetName -t $projetName-php $CONFIG_PROJETS_DIRECTORY/$projetName/build/php/.
+        cecho green-bold "Création de l'image PHP terminé"
+    fi
+    if [[ -n "$nginx" ]]; then
+        cecho green-bold "Création de l'image NGINX lié au projet sous le nom suivant : $projetName-nginx"
+        docker build --build-arg PROJET_NAME=$projetName -t $projetName-nginx $CONFIG_PROJETS_DIRECTORY/$projetName/build/nginx/.
+        cecho green-bold "Création de l'image NGINX terminé"
+    fi
+}
+
+#Fonctions principals
+
+function help () {
+    cecho green-bold "Liste des commandes disponibles :"
+    cecho gray "devcli create    : permet de crée un nouveau modèle de projet"
+    cecho gray "devcli build     : permet de regénerer les images docker à partir du modèle"
+    cecho gray "devcli install   : permet d'installer un projet"
+    cecho gray "devcli use       : permet d'effectuer des actions dans un projet"
+    cecho gray "devcli projet      : affiche l'ensemble des projets disponibles"
+}
+
+function install () {
+    verifyIfNoRoot
+    cecho cyan "Installation d'un projet"
+    install_projetChoice
+    install_destination
+    install_copy
+}
+
+function uninstall () {
+    verifyIfNoRoot
+    cecho cyan "Désinstallation d'un projet"
+    uninstall_choice
+    uninstall_deleteEnv
+    uninstall_verifyStop
+    deleteDirectory $HOME_DIRECTORY/$installName
+    cecho green-bold "L'installation $installName a été correctement supprimé"
+}
+
+function use () {
+    verifyIfNoRoot
+    use_installChoice
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]
+    then
+        use_serviceChoice
+    fi
+    cecho green "Lancement de l'interface CLI pour le service $useService"
+    docker exec -ti -u $USER_NAME $installName-$USER_NAME-$useService bash
+}
+
+function projet () {
+    cecho green-bold "Liste des projets disponibles à l'installation"
+    DirectoryInPath $CONFIG_PROJETS_DIRECTORY
+    projet_detail
+}
+
+function create (){
+    verifyIfRoot
+
+    cecho cyan "Création d'un nouveau modele de projet"
+    create_name
+    create_php_version
+    create_onlyphp
+    if [[ $onlyPHP == "FALSE" ]];then
+        create_nginx_version
+        create_vhost_nginx
+    fi
+    create_composer
+    create_symfonycli
+    create_extrascript
+
+    createDirectory $CONFIG_PROJETS_DIRECTORY/$projetName
+
+    create_generateConfigFile
+    cecho gray "-------------------------------------"
+    create_generateBuild
+}
+
+function build () {
+    verifyIfRoot
+    build_projetChoice  
+    cecho cyan-bold "Suppresion du build actuel du projet $projetName pour réecriture.."
+    echo "$CONFIG_PROJETS_DIRECTORY/$projetName/build"
+    deleteDirectory $CONFIG_PROJETS_DIRECTORY/$projetName/build
+    create_generateBuild
+}
+
+function php () {
+    cecho cyan-bold "Liste des versions PHP installables"
+    DirectoryInPath $DOCKERFILES_PHP_DIRECTORY
+}
+
+function nginx () {
+    cecho cyan-bold "Liste des versions NGINX installables"
+    DirectoryInPath $DOCKERFILES_NGINX_DIRECTORY
+}
+
+function vhost () {
+    cecho cyan-bold "Liste des vhosts NGINX disponibles"
+    DirectoryInPath $VHOSTS_DIRECTORY
+}
+
+function start () {
+    verifyIfNoRoot
+    start_choiceInstall
+    directoryExist $installPath
+    cecho green "Lancement de l'installation $installName"
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]
+    then
+        start_portChoice
+        cd $installPath
+        PORT=$installPort docker-compose up -d || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+        cecho green-bold "Le projet s'est lancé avec succès !"
+        cecho green-bold "URL : http://$(hostname -I | awk -F " " '{print $1}'):$installPort"
+    else
+        cd $installPath
+        docker-compose up -d || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+        cecho green-bold "Le projet s'est lancé avec succès !"
+    fi
+    
+}
+
+function stop () {
+    verifyIfNoRoot
+    local nginxPresents
+    stop_choiceInstall
+    directoryExist $installPath
+    cecho green "Arrêt de l'installation $installName"
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]
+    then
+        installPort=$(docker ps -f name=$installName-$USER_NAME-nginx --format "{{.Ports}}" | awk -F "->" '{print $1}' | awk -F ":" '{print $2}')
+        cd $installPath
+        PORT=$installPort docker-compose down || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+    else
+        cd $installPath
+        docker-compose down || { cecho red "Une erreur docker est survenue, veuillez contacter un administrateur"; exit 0; }
+    fi
+}
+
+function active () {
+    verifyIfNoRoot
+    cecho cyan-bold "Installations lancés :"
+    stop_listInstallActive
+}
+
+function inactive () {
+    verifyIfNoRoot
+    cecho cyan-bold "Installations éteintes :"
+    start_listInstallOffline
+}
+
+function list () {
+    verifyIfNoRoot
+    cecho cyan-bold "Installations lancés :"
+    stop_listInstallActive
+    cecho cyan-bold "Installations éteintes :"
+    start_listInstallOffline
+}
+
+function logs () {
+    verifyIfNoRoot
+    log_choice
+    for l in $(cat $CONFIG_PROJETS_DIRECTORY/$projetName/$projetName.conf);do
+        if [[ $(echo $l | awk -F= '{print $1}') == "nginx" ]]; then
+            nginxPresent=$(echo $l | awk -F= '{print $2}')
+            break
+        fi
+    done
+    if [[ ! -z "$nginxPresent" ]]
+    then
+        installPort=$(docker ps -f name=$installName-$USER_NAME-nginx --format "{{.Ports}}" | awk -F "->" '{print $1}' | awk -F ":" '{print $2}')
+        cd $installPath
+        PORT=$installPort docker-compose logs -f
+    else
+        cd $installPath
+        docker-compose logs -f
+    fi
+}
+
+function remove () {
+    verifyIfRoot
+    cecho green-bold "Suppresion d'un projet"
+    remove_choiceProjet
+    #Fonction à rajouter par la suite
+    #remove_choiceAssociateInstall
+    directoryExist $CONFIG_PROJETS_DIRECTORY/$projetName
+    remove_AssociateImage
+    deleteDirectory $CONFIG_PROJETS_DIRECTORY/$projetName
+    cecho green-bold "Suppresion du projet effectué"
+}
+
+
+case $choice in
+    "help") help
+    ;;
+    "projet") projet
+    ;;
+    "install") install
+    ;;
+    "uninstall") uninstall
+    ;;
+    "use") use
+    ;;
+    "create") create
+    ;;
+    "build") build
+    ;;
+    "nginx") nginx
+    ;;
+    "php") php
+    ;;
+    "vhost") vhost
+    ;;
+    "start") start
+    ;;
+    "stop") stop
+    ;;
+    "active") active
+    ;;
+    "inactive") inactive
+    ;;
+    "list") list
+    ;;
+    "log") logs
+    ;;
+    "remove") remove
+    ;;
+    *) cecho red "Commande invalide, retrouvez l'ensemble des commandes disponibles avec \"devcli help\""
+    ;;
+esac
+
+
+
